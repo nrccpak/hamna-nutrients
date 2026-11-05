@@ -55,7 +55,7 @@ function fmt(k, v) {
 }
 function ql(qty, measure) {
   if (measure === 'g') { return qty + ' g'; }
-  var m = /^(\d+(?:\.\d+)?)\s+(.*)$/.exec(measure);
+  var m = /^(\d+(?:\.\d+)?)[\s-]+(.*)$/.exec(measure);
   if (m) { var n = Math.round(qty * parseFloat(m[1]) * 100) / 100; return n + ' ' + m[2] + (n === 1 ? '' : (/s$|\)$/.test(m[2]) ? '' : 's')); }
   return qty + ' × ' + measure;
 }
@@ -73,28 +73,84 @@ function bar(p, cls, before) {
     before != null ? h('div', { class: 'fill before', style: 'width:' + Math.min(before, 100) + '%' }) : null);
 }
 
-/* ---------- suggestions (simple ranking from the Sheet's own numbers) ---------- */
-function suggest(day, limit) {
-  var out = [], lows = day.low.slice().sort(function (a, b) { return a.pct - b.pct; }).slice(0, 3);
-  if (!lows.length) { return out; }
-  var left = Math.max(day.kcal_left, 0), seen = {};
+/* ---------- suggestions: 1-2 foods that fit the calories left and fill today's biggest gaps ---------- */
+function lowKeys(d) { return d.low.map(function (l) { return l.key; }); }
+function portion(f, m, qty) {
+  var g = m.grams * qty, n = {};
+  Object.keys(f.per100).forEach(function (k) { n[k] = f.per100[k] * g / 100; });
+  return { food: f, m: m, qty: qty, grams: g, n: n };
+}
+function ideas(day, limit) {
+  var lows = lowKeys(day);
+  if (!lows.length) { return []; }
+  var T = S.cfg.targets, left = Math.max(day.kcal_left, 0), budget = Math.max(Math.min(left, 650), 150);
+  var need = {}; lows.forEach(function (k) { need[k] = Math.max(0, 100 - day.pct[k]); });
+  var singles = [];
   S.cfg.foods.forEach(function (f) {
     var m = f.measures[0]; if (!m) { return; }
-    var kc = f.per100.kcal * m.grams / 100;
-    if (kc > Math.max(left, 120)) { return; }
-    var gains = [];
-    lows.forEach(function (l) {
-      var g = f.per100[l.key] * m.grams / 100 / S.cfg.targets[l.key] * 100;
-      if (g >= 12) { gains.push({ key: l.key, g: Math.round(g) }); }
+    [1, 2].forEach(function (q) {
+      var p = portion(f, m, q);
+      if (p.n.kcal > budget || (q === 2 && p.n.kcal / 2 > 160)) { return; }
+      singles.push(p);
     });
-    if (!gains.length) { return; }
-    var score = gains.reduce(function (s, x) { return s + x.g; }, 0);
-    out.push({ food: f, m: m, kcal: Math.round(kc), gains: gains, score: score });
   });
-  out.sort(function (a, b) { return b.score - a.score; });
-  return out.filter(function (o) { if (seen[o.food.id]) { return false; } seen[o.food.id] = 1; return true; }).slice(0, limit);
+  function score(parts) {
+    var gain = {}, s = 0, kc = 0, tot = {};
+    parts.forEach(function (p) { Object.keys(p.n).forEach(function (k) { tot[k] = (tot[k] || 0) + p.n[k]; }); kc += p.n.kcal; });
+    lows.forEach(function (k) { var g = (tot[k] || 0) / T[k] * 100; if (g >= 5) { gain[k] = Math.round(Math.min(g, need[k])); s += Math.min(g, need[k]); } });
+    ['fat', 'carbs'].forEach(function (k) { var over = (day.totals[k] + (tot[k] || 0)) / T[k] * 100 - 105; if (over > 0) { s -= over * 0.5; } });
+    if (kc > left) { s -= (kc - left) * 0.1; }
+    s -= kc * 0.02;
+    ALERT.forEach(function (k) { if ((day.totals[k] + (tot[k] || 0)) / T[k] * 100 > 250) { s -= 15; } });
+    if (parts.some(function (p) { return p.food.confidence === 'L'; })) { s -= 2; }
+    return { s: s, gain: gain, kcal: Math.round(kc), tot: tot };
+  }
+  var cands = singles.map(function (p) { var r = score([p]); return { parts: [p], sc: r }; })
+    .filter(function (c) { return Object.keys(c.sc.gain).length; })
+    .sort(function (a, b) { return b.sc.s - a.sc.s; });
+  var top = cands.slice(0, 14), out = top.slice();
+  for (var i = 0; i < top.length; i++) {
+    for (var j = i + 1; j < top.length; j++) {
+      var A = top[i].parts[0], B = top[j].parts[0];
+      if (A.food.id === B.food.id || A.food.category === B.food.category || A.qty > 1 || B.qty > 1) { continue; }
+      var r = score([A, B]);
+      if (r.kcal <= budget && r.s > Math.max(top[i].sc.s, top[j].sc.s) + 8) { out.push({ parts: [A, B], sc: r }); }
+    }
+  }
+  out.sort(function (a, b) { return b.sc.s - a.sc.s; });
+  var used = {}, res = [];
+  out.forEach(function (c) {
+    if (res.length >= limit) { return; }
+    if (c.parts.some(function (p) { return used[p.food.id]; })) { return; }
+    c.parts.forEach(function (p) { used[p.food.id] = 1; });
+    res.push(c);
+  });
+  return res;
 }
-function sugLine(o) { return o.m.measure + ' ' + o.food.name.replace(/\s*\(.*\)/, '') + ' (' + o.gains.map(function (g) { return '+' + g.g + '% ' + label(g.key).toLowerCase(); }).join(', ') + ')'; }
+function shortName(f) { return f.name.replace(/\s*\(.*\)/, ''); }
+function partTitle(p) {
+  var nm = shortName(p.food), first = nm.split(/[\s,]/)[0].toLowerCase();
+  if (p.m.measure.toLowerCase().indexOf(first) >= 0) { return p.qty === 1 ? nm : p.qty + ' × ' + nm; }
+  return ql(p.qty, p.m.measure) + ' ' + nm;
+}
+function ideaTitle(c) { return c.parts.map(partTitle).join(' + '); }
+function ideaGain(c, max) { return Object.keys(c.sc.gain).sort(function (x, y) { return c.sc.gain[y] - c.sc.gain[x]; }).slice(0, max || 9).map(function (k) { return '+' + c.sc.gain[k] + '% ' + label(k).toLowerCase(); }).join(', '); }
+function showIdea(c) {
+  var d = S.day, sheet = h('div', { class: 'sheet', onclick: function (e) { if (e.target === sheet) { sheet.remove(); } } });
+  var box = h('div', null, h('h2', null, ideaTitle(c)), h('div', { class: 'sub' }, 'About ' + c.sc.kcal + ' kcal. Here is how your day would end if you eat this.'));
+  ['kcal'].concat(NINE).forEach(function (k) {
+    var before = d.pct[k], after = pct(k, d.totals[k] + (c.sc.tot[k] || 0));
+    box.appendChild(h('div', { style: 'display:flex;flex-direction:column;gap:4px' },
+      h('div', { class: 'row' }, h('span', { class: 'n' }, k === 'kcal' ? 'Calories' : label(k)), h('span', { class: 'v' }, before + '% → ' + after + '%')),
+      h('div', { class: 'track' }, h('div', { class: 'fill', style: 'width:' + Math.min(after, 100) + '%' }), h('div', { class: 'fill before', style: 'width:' + Math.min(before, 100) + '%' }))));
+  });
+  box.appendChild(h('button', { class: 'btn', type: 'button', onclick: function () {
+    c.parts.forEach(function (p) { S.cart.push({ food_id: p.food.id, name: p.food.name, qty: p.qty, measure: p.m.measure }); });
+    S.meal = defaultMeal(); sheet.remove(); toast('Added to your ' + S.meal.toLowerCase() + '. Review, then save.'); go('log');
+  } }, 'Add to my ' + defaultMeal().toLowerCase()));
+  box.appendChild(h('button', { class: 'btn alt', type: 'button', onclick: function () { sheet.remove(); } }, 'Close'));
+  sheet.appendChild(box); document.body.appendChild(sheet);
+}
 
 /* ---------- data loading ---------- */
 function loadAll() {
@@ -127,10 +183,10 @@ function screenToday() {
     h('div', { class: 'big' }, Math.round(d.totals.kcal).toLocaleString(), ' ', h('small', null, '/ ' + c.targets.kcal.toLocaleString() + ' kcal')),
     bar(p), h('span', { style: 'font-size:13px' }, d.kcal_left >= 0 ? d.kcal_left + ' kcal left for the day' : Math.abs(d.kcal_left) + ' kcal over today')));
   if (d.entries.length && d.low.length) {
-    var s = suggest(d, 2);
+    var s = ideas(d, 2);
     out.push(h('div', { class: 'warn' }, h('b', { class: 't' }, 'Low so far'),
       h('span', null, d.low.slice(0, 3).map(function (l) { return l.label + ' ' + l.pct + '%'; }).join(', ') + " of today's target."),
-      s.length ? h('span', null, h('b', null, 'Try: '), s.map(sugLine).join('  or  ')) : null));
+      s.length ? h('span', null, h('b', null, 'Try: '), s.map(function (c) { return ideaTitle(c) + ' (' + ideaGain(c, 3) + ')'; }).join('  or  ')) : null));
   } else if (!d.entries.length) {
     out.push(h('div', { class: 'card' }, h('span', null, 'Nothing logged yet today.'), h('button', { class: 'btn', type: 'button', onclick: function () { go('log'); } }, 'Log your first meal')));
   }
@@ -281,12 +337,16 @@ function screenSummary() {
     var g = h('div', { class: 'warn' }, h('b', { style: 'font-size:16px;color:var(--warnink)' }, 'Still missing today'));
     d.low.forEach(function (l) { g.appendChild(h('div', { class: 'row', style: 'font-size:14px' }, h('b', null, l.label), h('span', { style: 'color:var(--warnink)' }, l.pct + '% · need ' + (Math.round(l.need * 10) / 10) + ' ' + l.unit + ' more'))); });
     out.push(g);
-    var s = suggest(d, 4);
-    if (s.length) {
-      var card = h('div', { class: 'card' }, h('h2', null, 'Ideas to fill the gaps'), h('div', { class: 'sub' }, 'Fits your remaining calories where possible.'));
-      s.forEach(function (o) { card.appendChild(h('div', { class: 'meal' }, h('span', null, sugLine(o)), h('span', { class: 'k' }, o.kcal + ' kcal'))); });
-      out.push(card);
-    }
+    var s = ideas(d, 4);
+    var card = h('div', { class: 'card' }, h('h2', null, 'Ideas for your ' + defaultMeal().toLowerCase()),
+      h('div', { class: 'sub' }, d.kcal_left < 150 ? 'You are close to your calorie limit, so these are light options.' : 'Fits your ' + d.kcal_left + ' kcal left. Tap one to see how your day would end.'));
+    if (!s.length) { card.appendChild(h('div', { class: 'note' }, 'Nothing small enough fits your remaining calories. A glass of water or a light walk is fine today.')); }
+    s.forEach(function (c) {
+      card.appendChild(h('button', { class: 'food', type: 'button', onclick: function () { showIdea(c); } },
+        h('div', null, h('div', { style: 'font-size:15px;font-weight:600' }, ideaTitle(c)), h('div', { class: 's', style: 'color:var(--g)' }, ideaGain(c))),
+        h('span', { class: 'sub' }, c.sc.kcal + ' kcal')));
+    });
+    out.push(card);
   } else if (d.entries.length) { out.push(h('div', { class: 'card' }, h('b', null, 'Nothing is low right now. Nice balance.'))); }
   else { out.push(h('div', { class: 'card' }, 'Log a meal to see your summary.')); }
   out.push(h('div', { class: 'note' }, 'Food values are approximate estimates.'));
