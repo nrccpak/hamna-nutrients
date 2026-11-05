@@ -8,7 +8,7 @@ function store(k, v) {
   try { if (v === undefined) { return localStorage.getItem(k); } if (v === null) { localStorage.removeItem(k); } else { localStorage.setItem(k, v); } } catch (e) { return null; }
   return null;
 }
-var S = { screen: 'today', cfg: null, day: null, meal: null, cart: [], q: '', preview: null, busy: false, err: '', text: '', unmatched: [], parsing: false };
+var S = { screen: 'today', cfg: null, day: null, meal: null, cart: [], q: '', preview: null, busy: false, err: '', text: '', unmatched: [], parsing: false, rec: null };
 
 /* ---------- tiny DOM helper (text only, no innerHTML) ---------- */
 function h(tag, attrs) {
@@ -87,7 +87,7 @@ function ideas(day, limit) {
   var need = {}; lows.forEach(function (k) { need[k] = Math.max(0, 100 - day.pct[k]); });
   var singles = [];
   S.cfg.foods.forEach(function (f) {
-    var m = f.measures[0]; if (!m) { return; }
+    var m = f.measures[0]; if (!m || f.category === 'Raw ingredient') { return; }
     [1, 2].forEach(function (q) {
       var p = portion(f, m, q);
       if (p.n.kcal > budget || (q === 2 && p.n.kcal / 2 > 160)) { return; }
@@ -243,6 +243,7 @@ function screenLog() {
     cart.appendChild(h('button', { class: 'btn', type: 'button', disabled: S.busy, onclick: doPreview }, S.busy ? 'Checking…' : 'Review ' + S.cart.length + ' item' + (S.cart.length > 1 ? 's' : '')));
     out.push(cart);
   }
+  out.push(recipesCard());
   var inp = h('input', { type: 'search', placeholder: 'Search foods: roti, daal, milk…', 'aria-label': 'Search foods', value: S.q, oninput: function (e) { S.q = e.target.value; renderList(); } });
   var list = h('div', { class: 'card', id: 'foodlist', style: 'padding:4px 16px' });
   out.push(inp, list);
@@ -256,12 +257,12 @@ function renderList() {
   if (!fs.length) { l.appendChild(h('div', { class: 'spin' }, 'No match. Try another word.')); return; }
   fs.forEach(function (f) {
     var m = f.measures[0];
-    l.appendChild(h('button', { class: 'food', type: 'button', onclick: function () { pickFood(f); } },
+    l.appendChild(h('button', { class: 'food', type: 'button', onclick: function () { pickFood(f, S.screen === 'recipe' ? function (it) { S.rec.ing.push({ food_id: it.food_id, name: it.name, grams: Math.round(it.totalGrams * 10) / 10 }); } : null); } },
       h('div', null, h('div', { style: 'font-size:15px;font-weight:600' }, f.name), h('div', { class: 's' }, f.category + (m ? ' · ' + m.measure + ' ≈ ' + Math.round(f.per100.kcal * m.grams / 100) + ' kcal' : ''))),
       h('span', { style: 'color:var(--g);font-weight:700' }, '+')));
   });
 }
-function pickFood(f) {
+function pickFood(f, cb) {
   var sheet = h('div', { class: 'sheet', onclick: function (e) { if (e.target === sheet) { sheet.remove(); } } });
   var opts = f.measures.map(function (m) { return h('option', { value: m.measure }, m.measure + ' (' + m.grams + ' g)'); });
   opts.push(h('option', { value: '__g' }, 'Grams (exact)'));
@@ -272,8 +273,11 @@ function pickFood(f) {
   var ok = h('button', { class: 'btn', type: 'button', onclick: function () {
     var n = parseFloat(qty.value); if (!(n > 0)) { toast('Enter an amount'); return; }
     var it = { food_id: f.id, name: f.name };
-    if (sel.value === '__g') { it.grams = n; it.qty = n; it.measure = 'g'; } else { it.qty = n; it.measure = sel.value; }
-    S.cart.push(it); S.q = ''; sheet.remove(); toast('Added ' + f.name); render();
+    if (sel.value === '__g') { it.grams = n; it.qty = n; it.measure = 'g'; it.totalGrams = n; }
+    else { it.qty = n; it.measure = sel.value; var mm = f.measures.filter(function (x) { return x.measure === sel.value; })[0]; it.totalGrams = mm ? mm.grams * n : 0; }
+    S.q = ''; sheet.remove(); toast('Added ' + f.name);
+    if (cb) { cb(it); } else { S.cart.push(it); }
+    render();
   } }, 'Add');
   sheet.appendChild(h('div', null, h('h2', null, f.name), h('div', { class: 'sub' }, 'Measure'), sel, lab, qty, ok, h('button', { class: 'btn alt', type: 'button', onclick: function () { sheet.remove(); } }, 'Cancel')));
   document.body.appendChild(sheet);
@@ -290,9 +294,15 @@ function doParse() {
     render();
   }).catch(function (e) { S.parsing = false; toast(e.message); render(); });
 }
+function cartToApi(it) {
+  var o = { food_id: it.food_id };
+  if (it.grams) { o.grams = it.grams; } else { o.qty = it.qty; o.measure = it.measure; }
+  if (it.text) { o.text = it.text; }
+  return o;
+}
 function doPreview() {
   S.busy = true; render();
-  var items = S.cart.map(function (it) { var o = { food_id: it.food_id }; if (it.grams) { o.grams = it.grams; } else { o.qty = it.qty; o.measure = it.measure; } return o; });
+  var items = S.cart.map(cartToApi);
   api('preview', { date: S.cfg.today, meal: S.meal, items: items }).then(function (p) { S.preview = p; S.busy = false; S.screen = 'confirm'; render(); })
     .catch(function (e) { S.busy = false; toast(e.message); render(); });
 }
@@ -321,7 +331,7 @@ function screenConfirm() {
 function doSave() {
   if (S.busy) { return; }
   S.busy = true; render();
-  var items = S.cart.map(function (it) { var o = { food_id: it.food_id }; if (it.grams) { o.grams = it.grams; } else { o.qty = it.qty; o.measure = it.measure; } return o; });
+  var items = S.cart.map(cartToApi);
   api('add', { date: S.cfg.today, meal: S.meal, items: items }).then(function () { S.cart = []; S.unmatched = []; S.preview = null; return reloadDay(); })
     .then(function () { S.busy = false; toast('Saved'); go('today'); })
     .catch(function (e) { S.busy = false; toast(e.message); render(); });
@@ -370,17 +380,92 @@ function screenProfile() {
   return out;
 }
 
+/* ---------- home recipes ---------- */
+function recipeNut(ings, servings) {
+  var tot = {}, map = {};
+  S.cfg.foods.forEach(function (f) { map[f.id] = f; });
+  ings.forEach(function (i) { var f = map[i.food_id]; if (!f) { return; } Object.keys(f.per100).forEach(function (k) { tot[k] = (tot[k] || 0) + f.per100[k] * i.grams / 100 / (servings || 1); }); });
+  return tot;
+}
+function recipesCard() {
+  var rs = (S.cfg && S.cfg.recipes) || [];
+  var card = h('div', { class: 'card' }, h('h2', null, 'My recipes'));
+  if (!rs.length) { card.appendChild(h('div', { class: 'note' }, 'Save a dish you cook often (like karahi) once, then add it to a meal in one tap.')); }
+  rs.forEach(function (r) {
+    var n = recipeNut(r.ingredients, r.servings);
+    card.appendChild(h('button', { class: 'food', type: 'button', onclick: function () { recipeSheet(r); } },
+      h('div', null, h('div', { style: 'font-size:15px;font-weight:600' }, r.name), h('div', { class: 's' }, 'Per serving ≈ ' + Math.round(n.kcal || 0) + ' kcal · makes ' + r.servings)),
+      h('span', { style: 'color:var(--g);font-weight:700' }, '+')));
+  });
+  card.appendChild(h('button', { class: 'btn alt', type: 'button', onclick: function () { S.rec = { id: null, name: '', servings: 4, ing: [] }; S.q = ''; go('recipe'); } }, 'New recipe'));
+  return card;
+}
+function recipeSheet(r) {
+  var sheet = h('div', { class: 'sheet', onclick: function (e) { if (e.target === sheet) { sheet.remove(); } } });
+  var qty = h('input', { type: 'number', inputmode: 'decimal', min: '0.25', step: '0.25', value: '1', 'aria-label': 'Servings you ate' });
+  sheet.appendChild(h('div', null, h('h2', null, r.name), h('div', { class: 'sub' }, 'How many servings did you eat? (This recipe makes ' + r.servings + ')'), qty,
+    h('button', { class: 'btn', type: 'button', onclick: function () {
+      var e = parseFloat(qty.value); if (!(e > 0 && e <= 20)) { toast('Enter servings, like 1 or 0.5'); return; }
+      r.ingredients.forEach(function (i) {
+        var g = Math.round(i.grams / r.servings * e * 10) / 10; if (g <= 0) { return; }
+        S.cart.push({ food_id: i.food_id, name: i.name, qty: g, measure: 'g', grams: g, text: 'Recipe: ' + r.name });
+      });
+      sheet.remove(); toast('Added ' + r.name); render();
+    } }, 'Add to this ' + (S.meal || defaultMeal()).toLowerCase()),
+    h('div', { class: 'grid2' },
+      h('button', { class: 'btn alt', type: 'button', onclick: function () { sheet.remove(); S.rec = { id: r.id, name: r.name, servings: r.servings, ing: r.ingredients.map(function (i) { return { food_id: i.food_id, name: i.name, grams: i.grams }; }) }; S.q = ''; go('recipe'); } }, 'Edit'),
+      h('button', { class: 'btn alt', type: 'button', style: 'color:var(--warn);border-color:var(--warn)', onclick: function () {
+        if (!confirm('Delete the recipe "' + r.name + '"?')) { return; }
+        sheet.remove(); S.busy = true; render();
+        api('deleteRecipe', { recipe_id: r.id }).then(function (d) { S.cfg.recipes = d.recipes; store('hna_cfg', JSON.stringify(S.cfg)); S.busy = false; toast('Recipe deleted'); render(); })
+          .catch(function (x) { S.busy = false; toast(x.message); render(); });
+      } }, 'Delete')),
+    h('button', { class: 'btn alt', type: 'button', onclick: function () { sheet.remove(); } }, 'Cancel')));
+  document.body.appendChild(sheet);
+}
+function screenRecipe() {
+  var R = S.rec, out = [h('div', { class: 'row', style: 'justify-content:flex-start' },
+    h('button', { class: 'x', type: 'button', 'aria-label': 'Back', onclick: function () { go('log'); } }, '←'), h('h1', null, R.id ? 'Edit recipe' : 'New recipe'))];
+  out.push(h('div', { class: 'card' },
+    h('div', { class: 'sub' }, 'Recipe name'), h('input', { type: 'text', maxlength: '60', placeholder: 'e.g. Chicken karahi', value: R.name, 'aria-label': 'Recipe name', oninput: function (e) { R.name = e.target.value; } }),
+    h('div', { class: 'sub' }, 'How many servings does the whole pot make?'), h('input', { type: 'number', inputmode: 'numeric', min: '1', max: '50', value: String(R.servings), 'aria-label': 'Servings', oninput: function (e) { R.servings = parseFloat(e.target.value) || 1; updTotals(); } })));
+  var ing = h('div', { class: 'card' }, h('h2', null, 'Ingredients (whole pot)'));
+  if (!R.ing.length) { ing.appendChild(h('div', { class: 'note' }, 'Add each ingredient below with the amount for the whole pot.')); }
+  R.ing.forEach(function (i, idx) { ing.appendChild(h('div', { class: 'row' }, h('span', null, i.name + ' · ' + i.grams + ' g'), h('button', { class: 'x', type: 'button', 'aria-label': 'Remove ' + i.name, onclick: function () { R.ing.splice(idx, 1); render(); } }, '✕'))); });
+  var tot = h('div', { class: 'note', id: 'rectot' });
+  ing.appendChild(tot); out.push(ing);
+  function updTotals() {
+    var n = recipeNut(R.ing, R.servings);
+    tot.textContent = R.ing.length ? 'Per serving ≈ ' + Math.round(n.kcal || 0) + ' kcal, ' + Math.round((n.protein || 0) * 10) / 10 + ' g protein, ' + Math.round((n.iron || 0) * 10) / 10 + ' mg iron, ' + Math.round(n.calcium || 0) + ' mg calcium' : '';
+  }
+  updTotals();
+  out.push(h('input', { type: 'search', placeholder: 'Search an ingredient: chicken, onion, oil…', 'aria-label': 'Search ingredient', value: S.q, oninput: function (e) { S.q = e.target.value; renderList(); } }));
+  out.push(h('div', { class: 'card', id: 'foodlist', style: 'padding:4px 16px' }));
+  setTimeout(renderList, 0);
+  out.push(h('div', { class: 'bar', style: 'grid-template-columns:1fr' }, h('button', { class: 'btn', type: 'button', disabled: S.busy, onclick: saveRec }, S.busy ? 'Saving…' : 'Save recipe')));
+  return out;
+}
+function saveRec() {
+  var R = S.rec;
+  if (!R.name.trim()) { toast('Give the recipe a name'); return; }
+  if (!R.ing.length) { toast('Add at least one ingredient'); return; }
+  S.busy = true; render();
+  api('saveRecipe', { recipe_id: R.id || undefined, name: R.name.trim(), servings: R.servings, ingredients: R.ing.map(function (i) { return { food_id: i.food_id, grams: i.grams }; }) })
+    .then(function (d) { S.cfg.recipes = d.recipes; store('hna_cfg', JSON.stringify(S.cfg)); S.rec = null; S.busy = false; toast('Recipe saved'); go('log'); })
+    .catch(function (e) { S.busy = false; toast(e.message); render(); });
+}
+
 /* ---------- router ---------- */
 function go(s) { S.screen = s; if (s === 'log' && !S.meal) { S.meal = defaultMeal(); } render(); var sc = document.getElementById('screen'); if (sc) { sc.scrollTop = 0; } }
 function render() {
   var sc = document.getElementById('screen');
   if (S.screen === 'today' && !creds().key) { S.screen = 'profile'; }
   if (!S.meal) { S.meal = defaultMeal(); }
-  var f = { today: screenToday, log: screenLog, confirm: screenConfirm, summary: screenSummary, profile: screenProfile }[S.screen];
-  var keep = S.screen === 'log' && document.activeElement && document.activeElement.type === 'search';
+  var f = { today: screenToday, log: screenLog, confirm: screenConfirm, recipe: screenRecipe, summary: screenSummary, profile: screenProfile }[S.screen];
+  var keep = (S.screen === 'log' || S.screen === 'recipe') && document.activeElement && document.activeElement.type === 'search';
   sc.textContent = '';
   add(sc, f());
-  Array.prototype.forEach.call(document.querySelectorAll('#nav button'), function (b) { b.className = (b.dataset.go === S.screen || (S.screen === 'confirm' && b.dataset.go === 'log')) ? 'on' : ''; });
+  Array.prototype.forEach.call(document.querySelectorAll('#nav button'), function (b) { b.className = (b.dataset.go === S.screen || ((S.screen === 'confirm' || S.screen === 'recipe') && b.dataset.go === 'log')) ? 'on' : ''; });
   if (keep) { var i = sc.querySelector('input[type=search]'); if (i) { i.focus(); } }
 }
 Array.prototype.forEach.call(document.querySelectorAll('#nav button'), function (b) { b.addEventListener('click', function () { go(b.dataset.go); if (b.dataset.go !== 'profile' && !S.day && creds().key && !S.busy) { loadAll(); } }); });
