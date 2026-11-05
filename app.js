@@ -8,7 +8,7 @@ function store(k, v) {
   try { if (v === undefined) { return localStorage.getItem(k); } if (v === null) { localStorage.removeItem(k); } else { localStorage.setItem(k, v); } } catch (e) { return null; }
   return null;
 }
-var S = { screen: 'today', cfg: null, day: null, meal: null, cart: [], q: '', preview: null, busy: false, err: '' };
+var S = { screen: 'today', cfg: null, day: null, meal: null, cart: [], q: '', preview: null, busy: false, err: '', text: '', unmatched: [], parsing: false };
 
 /* ---------- tiny DOM helper (text only, no innerHTML) ---------- */
 function h(tag, attrs) {
@@ -172,8 +172,13 @@ function screenLog() {
   var out = [h('h1', null, 'Log food'), errBox()];
   if (!S.cfg) { out.push(h('div', { class: 'spin' }, S.busy ? 'Loading…' : 'Connect in Profile first.')); return out; }
   out.push(h('div', { class: 'chips' }, S.cfg.meals.map(function (m) { return h('button', { class: 'chip' + (S.meal === m ? ' on' : ''), type: 'button', onclick: function () { S.meal = m; render(); } }, m); })));
-  out.push(h('div', { class: 'card' }, h('b', null, 'Type what you ate'),
-    h('div', { class: 'note' }, 'Typing a whole sentence (like "2 roti and daal") is coming in the next update. For now, search and tap a food below.')));
+  var ta = h('textarea', { id: 'mealtext', rows: '2', maxlength: '400', placeholder: 'e.g. 2 roti aur 1 katori daal, 1 glass doodh', 'aria-label': 'Type what you ate', oninput: function (e) { S.text = e.target.value; } }, S.text);
+  out.push(h('div', { class: 'card' }, h('b', null, 'Type what you ate'), ta,
+    h('button', { class: 'btn', type: 'button', disabled: S.parsing, onclick: doParse }, S.parsing ? 'Reading…' : 'Read my meal'),
+    h('div', { class: 'note' }, 'English, Urdu or Roman Urdu is fine. You can fix everything before saving.')));
+  if (S.unmatched.length) {
+    out.push(h('div', { class: 'warn' }, h('b', { class: 't' }, "Couldn't find these in the food list"), h('span', null, S.unmatched.join(', ')), h('span', { class: 'note' }, 'Search below and add them by hand.')));
+  }
   if (S.cart.length) {
     var cart = h('div', { class: 'card' }, h('h2', null, 'This ' + S.meal.toLowerCase()));
     S.cart.forEach(function (it, i) {
@@ -217,6 +222,18 @@ function pickFood(f) {
   sheet.appendChild(h('div', null, h('h2', null, f.name), h('div', { class: 'sub' }, 'Measure'), sel, lab, qty, ok, h('button', { class: 'btn alt', type: 'button', onclick: function () { sheet.remove(); } }, 'Cancel')));
   document.body.appendChild(sheet);
 }
+function doParse() {
+  var t = S.text.trim();
+  if (!t) { toast('Type what you ate first'); return; }
+  S.parsing = true; S.unmatched = []; render();
+  api('parse', { text: t }).then(function (r) {
+    r.items.forEach(function (it) { S.cart.push({ food_id: it.food_id, name: it.name, qty: it.qty, measure: it.measure, grams: it.grams }); });
+    S.unmatched = r.unmatched || []; S.parsing = false;
+    if (r.items.length) { S.text = ''; toast('Added ' + r.items.length + ' item' + (r.items.length > 1 ? 's' : '') + '. Check them below.'); }
+    else { toast('Nothing matched. Try the search below.'); }
+    render();
+  }).catch(function (e) { S.parsing = false; toast(e.message); render(); });
+}
 function doPreview() {
   S.busy = true; render();
   var items = S.cart.map(function (it) { var o = { food_id: it.food_id }; if (it.grams) { o.grams = it.grams; } else { o.qty = it.qty; o.measure = it.measure; } return o; });
@@ -249,7 +266,7 @@ function doSave() {
   if (S.busy) { return; }
   S.busy = true; render();
   var items = S.cart.map(function (it) { var o = { food_id: it.food_id }; if (it.grams) { o.grams = it.grams; } else { o.qty = it.qty; o.measure = it.measure; } return o; });
-  api('add', { date: S.cfg.today, meal: S.meal, items: items }).then(function () { S.cart = []; S.preview = null; return reloadDay(); })
+  api('add', { date: S.cfg.today, meal: S.meal, items: items }).then(function () { S.cart = []; S.unmatched = []; S.preview = null; return reloadDay(); })
     .then(function () { S.busy = false; toast('Saved'); go('today'); })
     .catch(function (e) { S.busy = false; toast(e.message); render(); });
 }
