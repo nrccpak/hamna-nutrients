@@ -8,7 +8,7 @@ function store(k, v) {
   try { if (v === undefined) { return localStorage.getItem(k); } if (v === null) { localStorage.removeItem(k); } else { localStorage.setItem(k, v); } } catch (e) { return null; }
   return null;
 }
-var S = { screen: 'today', cfg: null, day: null, meal: null, cart: [], q: '', preview: null, busy: false, err: '', text: '', unmatched: [], parsing: false, rec: null };
+var S = { screen: 'today', cfg: null, day: null, meal: null, cart: [], q: '', preview: null, busy: false, err: '', text: '', unmatched: [], parsing: false, rec: null, week: null, weekAt: 0 };
 
 /* ---------- tiny DOM helper (text only, no innerHTML) ---------- */
 function h(tag, attrs) {
@@ -359,6 +359,7 @@ function screenSummary() {
     out.push(card);
   } else if (d.entries.length) { out.push(h('div', { class: 'card' }, h('b', null, 'Nothing is low right now. Nice balance.'))); }
   else { out.push(h('div', { class: 'card' }, 'Log a meal to see your summary.')); }
+  out.push(weekCard());
   out.push(h('div', { class: 'note' }, 'Food values are approximate estimates.'));
   return out;
 }
@@ -453,6 +454,44 @@ function saveRec() {
   api('saveRecipe', { recipe_id: R.id || undefined, name: R.name.trim(), servings: R.servings, ingredients: R.ing.map(function (i) { return { food_id: i.food_id, grams: i.grams }; }) })
     .then(function (d) { S.cfg.recipes = d.recipes; store('hna_cfg', JSON.stringify(S.cfg)); S.rec = null; S.busy = false; toast('Recipe saved'); go('log'); })
     .catch(function (e) { S.busy = false; toast(e.message); render(); });
+}
+
+/* ---------- weekly trends (last 7 days) ---------- */
+function loadWeek() {
+  if (S.busyWeek || !creds().key) { return; }
+  S.busyWeek = true;
+  api('week', { date: S.day ? S.day.date : undefined }).then(function (w) { S.week = w; S.weekAt = Date.now(); S.busyWeek = false; if (S.screen === 'summary') { render(); } })
+    .catch(function () { S.busyWeek = false; S.weekErr = true; if (S.screen === 'summary') { render(); } });
+}
+function weekCard() {
+  if (!S.week || Date.now() - S.weekAt > 120000) { if (!S.busyWeek) { loadWeek(); } }
+  var w = S.week, card = h('div', { class: 'card' }, h('h2', null, 'Your week'));
+  if (!w) { card.appendChild(h('div', { class: 'sub' }, S.weekErr ? 'Could not load the week right now.' : 'Loading…')); return card; }
+  var logged = w.days.filter(function (d) { return d.logged; });
+  if (logged.length < 2) { card.appendChild(h('div', { class: 'note' }, 'Log meals on a few days and your weekly trend will show up here.')); return card; }
+  var thr = w.threshold * 100, DN = ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa'];
+  var avgK = Math.round(logged.reduce(function (a, d) { return a + d.totals.kcal; }, 0) / logged.length);
+  card.appendChild(h('div', { class: 'sub' }, 'Based on ' + logged.length + ' day' + (logged.length === 1 ? '' : 's') + ' you logged. Average ' + avgK.toLocaleString() + ' kcal a day (goal ' + Math.round(w.targets.kcal).toLocaleString() + ').'));
+  var rows = ALERT.map(function (k) {
+    var hit = logged.filter(function (d) { return d.pct[k] >= thr; }).length;
+    var avg = Math.round(logged.reduce(function (a, d) { return a + d.pct[k]; }, 0) / logged.length);
+    return { k: k, hit: hit, avg: avg };
+  }).sort(function (a, b) { return a.hit - b.hit || a.avg - b.avg; });
+  rows.forEach(function (r) {
+    var bars = h('div', { style: 'display:flex;gap:3px;align-items:flex-end;height:26px' });
+    w.days.forEach(function (d) {
+      var p = d.logged ? Math.min(d.pct[r.k], 100) : 0;
+      bars.appendChild(h('div', { title: d.date + ': ' + (d.logged ? d.pct[r.k] + '%' : 'not logged'), style: 'width:12px;height:' + Math.max(p * 0.26, 2) + 'px;border-radius:3px;background:' + (!d.logged ? '#d9d9d9' : d.pct[r.k] >= thr ? 'var(--g)' : '#e0a030') }));
+    });
+    var low = r.hit <= logged.length / 2;
+    card.appendChild(h('div', { class: 'row', style: 'align-items:center;gap:8px' },
+      h('div', null, h('b', { style: 'font-size:14px' }, S.cfg.labels[r.k]), h('div', { class: 'sub', style: low ? 'color:var(--warnink)' : '' }, 'on track ' + r.hit + ' of ' + logged.length + ' days · avg ' + r.avg + '%')), bars));
+  });
+  var worst = rows.filter(function (r) { return r.hit <= logged.length / 2; }).slice(0, 3).map(function (r) { return S.cfg.labels[r.k]; });
+  if (worst.length) { card.appendChild(h('div', { class: 'warn', style: 'margin-top:8px' }, h('b', null, 'Keeps running low: ' + worst.join(', ')), h('div', { class: 'sub' }, 'Plan foods rich in these for the coming days.'))); }
+  else { card.appendChild(h('div', { class: 'note' }, 'All key nutrients were on track on most days. Well done.')); }
+  card.appendChild(h('div', { class: 'sub', style: 'margin-top:6px' }, 'Bars: oldest day on the left, today on the right. Green = on track, orange = low, grey = not logged.'));
+  return card;
 }
 
 /* ---------- router ---------- */
